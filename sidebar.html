@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+    .default-button{
+      color: #FFFFFF;
+      background: #0f9d58;
+      margins: 5em;
+      width: 15em;
+      height: 3em;
+      border-radius: 4px;
+      box-shadow: insert 0 0x #bbbfc2;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .disabled-button{
+      color: #FFFFFF;
+      background: #6e6d6c;
+      margins: 5em;
+      width: 15em;
+      height: 3em;
+      border-radius: 4px;
+      box-shadow: insert 0 0x #bbbfc2;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    </style>
+  </head>
+  <body>
+    <input type="button" class="default-button" id="sort" onclick="lunchSortClient.lunchSort_click();" value="Sort people into dinner groups"/><br>
+    <input type="button" class="default-button" id="setup" onclick="lunchSortClient.setup_click();" value="Prepare sheet for new Groups"/><br>
+    <input type="button" class="default-button" id="clearHistory" onclick="lunchSortClient.clearHistory_click();" value="Reset History"/>
+  </body>
+  <script>
+ 
+  var lunchSortClient = {
+  stateEnum:{DIRTY:"DIRTY",CLEAN:"CLEAN"},
+  initSuccess: function(state){
+    if(state === lunchSortClient.stateEnum.DIRTY){
+      lunchSortClient.setButtonState("sort",false);
+    }
+    else{
+      lunchSortClient.setButtonState("sort",true);
+    }
+  },
+  initFailure: function(){
+    console.log("init failed.");
+    lunchSortClient.initSuccess(lunchSortClient.stateEnum.DIRTY);
+  },
+  lunchSort_click: function(){
+    function success(){
+      lunchSortClient.setButtonState("sort",false);
+    }
+    google.script.run.withSuccessHandler(success).lunchSort_click();
+  },
+  setup_click: function(){
+    function success(){
+      lunchSortClient.setButtonState("sort",true);
+    }
+    google.script.run.withSuccessHandler(success).setup_click();
+  },
+  clearHistory_click: function(){
+    function success(){
+      lunchSortClient.setButtonState("sort",true);
+    }
+    google.script.run.withSuccessHandler(success).clearHistory_click();
+  },
+  setButtonState: function(id,enable){
+    var element = document.getElementById(id);
+    if(enable){
+      lunchSortClient.removeClass(element,"disabled-button");
+      lunchSortClient.addClass(element,"default-button");
+      element.removeAttribute("disabled");
+    }
+    else{
+      lunchSortClient.removeClass(element,"default-button");
+      lunchSortClient.addClass(element,"disabled-button");
+      element.setAttribute("disabled","disabled");
+    }   
+  },
+  removeClass: function(element,className){
+    if(element.classList){
+      element.classList.remove(className);
+    }
+    else{
+      element.className = element.replace(className," ");
+    }
+  },
+  addClass: function(element,className){
+    if(element.classList){
+      element.classList.add(className);
+    }
+    else{
+      element.className += " " + className;
+    }
+  }
+  };
+  
+  google.script.run.withSuccessHandler(lunchSortClient.initSuccess).withFailureHandler(lunchSortClient.initFailure).initializeAndGetState();
+  </script>
+</html>
+
+

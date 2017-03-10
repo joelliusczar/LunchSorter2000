@@ -1,0 +1,1131 @@
+<script>
+
+(function (){
+  //global vars------------------------------------------------------------------------------------------------
+  var entryBoxNum = 0;
+  var prevEditValue = "";
+  var globalState = "";
+  const stagingHistoryEntry = "<div id='staging-history-entry' class='history-entries not-custom' data-lkRange='0'>Current</div>";
+  const customHistoryEntry = "<div id='custom-history-entry' class='history-entries' data-lkRange='1'>Custom</div>";
+  var duplicatePersonChecker = new TwoWayDictionary();
+  var duplicatePlaceChecker = new TwoWayDictionary();
+  const dupErrorCounter = new DuplicateErrorCounter();
+  const peopleNameTree = new Trie(true);
+  const placeNameTree = new Trie(true);
+  
+  const sort$ = $("#sort");  
+  const newSortSame$ = $("#newSortSame");
+  const newSortEmpty$ = $("#newSortEmpty")
+  const commitCustom$ = $("#commitCustom");
+  const clearCustom$ = $("#clearCustom");
+  const clearStaging$ = $("#clearStaging");
+  const output$ = $("#output");
+  var histEntriesBox$ = $("#history-entries-box");
+  //end global vars------------------------------------------------------------------------------------------
+  
+  //global events----------------------------------------------------------------------------------------------
+  sort$.click(function(e){
+    var inputs = scoopAllInputs();
+    google.script.run.withSuccessHandler(sortSuccess).withFailureHandler(failureCallback).processInputs(inputs);
+  });
+  
+  newSortSame$.click(function(e){
+    google.script.run.withSuccessHandler(commitStagingToHistorySuccess).withFailureHandler(failureCallback).commitStagingToHistory(false);
+  });
+  
+  newSortEmpty$.click(function(e){
+    google.script.run.withSuccessHandler(commitStagingAndClearInputs).withFailureHandler(failureCallback).commitStagingToHistory(true);
+  });
+  
+  $("#resetApp").click(function(e){
+    if(confirm("Are you sure you want to reset all your settings with this app?")){
+      google.script.run.withSuccessHandler(resetSuccess).withFailureHandler(failureCallback).resetAll();
+    }
+  });
+  
+  $("#deleteEntry").click(function(e){
+    var selected$ = $(".selected-history-entry");
+    var lkRange = selected$.attr("data-lkRange");
+    if(lkRange ==="0"){
+      displayNotice("Cannot delete the \"Current\" entry");
+    }
+    else{
+      var prev$ = selected$.prev(".history-entries");
+      if(prev$.length){
+        selectHistoryEntry(prev$);
+      }
+      else{
+        var next$ = selected$.next(".history-entries");
+        if(next$.length){
+          selectHistoryEntry(next$);
+        }
+        else{
+          hide(output$);
+          hide(histEntriesBox$);
+        }
+      }
+      var deletedRangeInfo = getA1RangeInfo(lkRange);
+      var changeLength = deletedRangeInfo.lastRow - deletedRangeInfo.firstRow +1;
+      correctHistAttrs(-1*changeLength,-1*getInputSectionAndIndex(selected$.attr("id")).index);
+      selected$.remove();
+      unhide($("#loading-box"));
+      google.script.run.withSuccessHandler(historyEntryDeleteSuccess).withFailureHandler(failureCallback).deleteHistoryEntry(lkRange,selected$.attr("data-index"));
+    }
+  });
+  
+  $("#add-col").click(function(e){
+    addEmptyColumn();
+  });
+  
+  $("#add-row").click(function(e){
+    const lastRow$ = output$.find("tr").last();
+    const selected$ = $(".selected-history-entry");
+    var row = lastRow$.attr("data-row")*1;
+    var index = selected$.attr("data-index");
+    $("#output-table").append(buildEmptyRow(lastRow$.find("td").length,row+1));
+    output$.find("tr").last().find(".outputCell").click(tableCellClick);
+    var lkRange = selected$.attr("data-lkRange");
+    if(lkRange != "0" && lkRange != "1"){
+      unhide($("#loading-box"));
+      google.script.run.withFailureHandler(failureCallback).withSuccessHandler(expandRows_success).withUserObject(index).expandRowCount(index,1);
+    }
+  });
+  
+  commitCustom$.click(function(e){
+    google.script.run.withFailureHandler(failureCallback).withSuccessHandler(commitCustom_Success).commitCustomToHistory();
+  });
+  
+  clearCustom$.click(function(e){
+    google.script.run.withFailureHandler(failureCallback).withSuccessHandler(clearCustom_success).clearCustom();
+  });
+  
+  clearStaging$.click(function(e){
+    google.script.run.withFailureHandler(failureCallback).withSuccessHandler(clearStaging_success).clearStaging();
+  });
+  
+  wireUpEventsToNewEntryElement($(".person-field"));
+  wireUpEventSpecificControls($(".person-field"));
+  wireUpEventsToNewEntryElement($(".place-field"));
+  wireUpEventSpecificControls($(".place-field"));
+  
+  $(".close").click(closeModal);
+  //end global events------------------------------------------------------------------------------------------
+  
+  //reused events----------------------------------------------------------------------------------------------
+  function autoCompleteKeyDown(e){
+    const target$ = $(e.target);
+    target$.children(".suggestion").val("");
+  }
+  
+  function autoCompleteKeyUp(target$,root){
+    var prefix = target$.val();
+    var node = root.getMatch(prefix);
+	target$.children(".suggestion").text(node.next());
+  }
+  
+  function wireUpEventSpecificControls(element$){
+    console.log(element$.attr("data-section"));
+    if(element$.attr("data-section") === "person"){
+      wireUpEventsPeopleEntries();
+    }
+    else if(element$.attr("data-section") === "place"){
+      wireUpEventsPlaceEntries();
+    }
+  }
+  
+  function wireUpEventsPeopleEntries(){
+    safeBindEvent($(".person-field").children("input[type='text']"),"keyup",peopleAutoComplete);
+  }
+  
+  function wireUpEventsPlaceEntries(){
+    safeBindEvent($(".place-field").children("input[type='text']"),"keyup",placeAutoComplete);
+  }
+  
+  function peopleAutoComplete(e){
+    if(e.which === 8 || e.which === 16) return;
+    autoCompleteKeyUp($(e.target),peopleNameTree);
+  }
+  
+  function placeAutoComplete(e){
+    if(e.which === 8 || e.which === 16) return;
+    autoCompleteKeyUp($(e.target),placeNameTree);
+  }
+  
+  function insertPersonLookup(name){
+    if(!peopleNameTree.search(name)){
+      peopleNameTree.push(name);
+      google.script.run.withFailureHandler(failureCallback).insertNameLookup(name,"person");
+    }
+  }
+  
+  function insertPlaceLookup(name){
+    if(!placeNameTree.search(name)){
+      placeNameTree.push(name);
+      google.script.run.withFailureHandler(failureCallback).insertNameLookup(name,"place");
+    }
+  }
+  
+  function insertNameLookup(name,section){
+    if(section === "person"){
+      insertPersonLookup(name);
+    }else if(section === "place"){
+      insertPlaceLookup(name);
+    }
+  }
+  //end-reused events
+  
+  //run--------------------------------------------------------------------------------------------------------
+  handleMigrations();
+  loadStateFromServer();
+  loadInputsFromServer();
+  loadAutoCompleteData();
+  //end run----------------------------------------------------------------------------------------------------
+  
+  //page load----------------------------------------------------------------------------------------------
+  function wireUpEventsToNewEntryElement(element$){
+    safeBindEvent(element$,"focusin",focusOnEntryCell);
+    safeBindEvent(element$.children("select"),"focusout",focusOutOfInput);
+    var txtBox$ = element$.children("input[type='text']");
+    safeBindEvent(txtBox$,"focusout",focusOutOfInput);
+    txtBox$.val("");
+    safeBindEvent(txtBox$,"keydown",function(e){
+      autoCompleteKeyDown(e);
+    });
+  }
+  
+  function loadInputsFromServer(){
+    google.script.run.withSuccessHandler(loadInputsFromServerSuccess).withFailureHandler(failureCallback).getPreviousInputs();
+  }
+  
+  function loadStateFromServer(){
+    google.script.run.withSuccessHandler(setLocalState).withFailureHandler(failureCallback).getState();
+  }
+  
+  function loadHistoryRefs(){
+    google.script.run.withSuccessHandler(getHistEntriesSuccess).withFailureHandler(failureCallback).getAllHistoryReferences();
+  }
+  
+  function loadHistoryRefsThenSelect(){
+    google.script.run.withSuccessHandler(histEntriesGetSuccessThenSelect).withFailureHandler(failureCallback).getAllHistoryReferences();
+  }
+  
+  function handleMigrations(){
+    unhide($("#loading-box"));
+    google.script.run.withSuccessHandler(migration_success).withFailureHandler(failureCallback).handleMigrations();
+  }
+  
+  function migration_success(){  
+    loadHistoryRefsThenSelect();
+    hide($("#loading-box"));
+  }
+  
+  function setLocalState(state){
+    globalState = state;
+    if(state === "ready"){
+      sort$.children("span").html("Sort people into parties");     
+    }
+    else if(state === "staging"){
+      sort$.children("span").html("Sort Again without committing");
+    }
+    else{
+      throw new Error("Invalid state was returned from the sever.");
+    }
+  }
+  
+  function loadAutoCompleteData(){
+   google.script.run.withFailureHandler(failureCallback).withSuccessHandler(getACPeople_success).getAllNames("person");
+   google.script.run.withFailureHandler(failureCallback).withSuccessHandler(getACPlaces_success).getAllNames("place");
+  }
+  //end page load------------------------------------------------------------------------------------------
+  
+  //output table ------------------------------------------------------------------------------------------
+  function outputTable(resultTbl){
+    output$.html("");
+    if(!resultTbl||!resultTbl.length) return;
+    var output = "<table id='output-table' >";
+    output += buildHeaderRow(resultTbl[0]);
+    for(var i=1;i<resultTbl.length;i++){
+      output += buildTableRow(resultTbl[i],i+1);
+    }
+    output += "</table>";
+    output$.html(output);
+    $("body").height($("body").height() + output$.height());
+    safeBindEvent($(".outputCell"),"click",tableCellClick);
+  }
+  
+  function tableCellClick(e){
+    if(e.target !== e.delegateTarget) return; //prevent the click event from happening when you click on the inside textbox
+    makeCellEditable($(e.target));
+  }
+  
+  function leaveOutputCell(e){
+    sendUpdateValues($(e.target));
+  }
+  
+  function sendUpdateValues(target$){
+    var inputValue = target$.val().trim();
+    target$.addClass("non-editible");
+    const parent$ = target$.parent();
+    const coordinates = getRowColCoordinatesFromId(parent$.attr("id"));
+    parent$.html(inputValue);
+    const selected$ = $(".selected-history-entry");
+    var lkRange = $(".selected-history-entry").attr("data-lkRange");
+    if(lkRange != "0" && lkRange != "1"){
+      var rangeDiff = coordinates.col - convertToNum(getA1RangeInfo(lkRange).lastCol);
+      if(rangeDiff > 0){
+        google.script.run.withFailureHandler(failureCallback).withSuccessHandler(expandCols_success).expandColCount(selected$.attr("data-index")*1,rangeDiff);
+      }
+    }
+    google.script.run.withFailureHandler(failureCallback).updateValueInResults(inputValue,coordinates.row,coordinates.col,selected$.attr("data-lkRange"));
+    insertNameLookup(inputValue,parent$.attr("data-section"));    
+  }
+  
+  function makeCellEditable(elem$){
+    if(elem$.has("input").length){
+      return;
+    }   
+    var sPrevValue = makeStrHTMLSafe(elem$.html());
+    var section = elem$.attr("data-section");
+    var txtBox = ["<input",
+                  " type='text'",
+                  " class='editable-cell'",
+                  " value='"+sPrevValue+"'",
+                  " data-section='" +section+"'",
+                  " />"].join("");
+    elem$.html(txtBox);
+    elem$.removeClass("non-editible");
+    var txtBox$ = elem$.children("input[type='text']");
+    safeBindEvent(txtBox$,"focusout",leaveOutputCell);
+    txtBox$.focus();
+    safeBindEvent(txtBox$,"keydown",function(e){
+      if(e.which === 13){ //if user presses the enter key
+        sendUpdateValues($(e.target));
+      }
+      autoCompleteKeyDown(e);
+    });
+    wireUpEventSpecificControls(txtBox$);
+  }
+  
+  function buildTableRow(row,rowIndex){
+    var output = "<tr data-row='"+rowIndex+"'>";
+    row.forEach(function(cellValue,colIndex){
+      output += buildTableCell(cellValue,rowIndex,colIndex+1);
+    });
+    output += "</tr>";
+    return output;
+  }
+  
+  function buildEmptyRow(size,rowIndex){
+    var output = "<tr data-row='"+rowIndex+"'>";
+    for(var i = 1;i<=size;i++){
+      output += buildTableCell("",rowIndex,i);
+    }
+    output += "</tr>";
+    return output;
+  }
+  
+  function buildTableCell(cellValue,row,col){
+    return ["<td", 
+           " id='result-row",row+"-col"+col+"'",
+           " data-row='"+row+"'",
+           " data-col='"+col+"'",
+           " data-section='person'",
+           " class='outputCell regular-border non-editible cell'>",
+           cellValue,
+           "</td>"].join("");
+  }
+  
+  function buildHeaderRow(headerRow){
+    var output = "<tr id='header-row'>";
+    headerRow.forEach(function(headerValue,index){
+      output += buildHeaderCell(headerValue,index+1);
+    });
+    output += "</tr>";
+    return output;
+  }
+  
+  function addEmptyColumn(){
+    var rows$ = output$.find("tr");
+    rows$.each(function(i,elem){ 
+      var lastCell$ =$(elem).children().last();
+      var col = lastCell$.attr("data-col")*1;
+      if(i === 0){
+        lastCell$.after(buildHeaderCell("",col+1));
+      }
+      else{
+        lastCell$.after(buildTableCell("",i+1,col+1));
+      }
+      lastCell$.next().click(tableCellClick);
+    });
+  }
+  
+  function buildHeaderCell(cellValue,index){
+    return ["<th",
+    " id='result-row1-col"+index+"'",
+    " data-row='1'",
+    " data-col='"+index+"'",
+    " data-section='place'",
+    " class='outputCell regular-border cell'>",
+    cellValue,
+    "</th>"].join("");
+  }
+  //end output table----------------------------------------------------------------------------------------
+   
+  //server success callbacks--------------------------------------------------------------------------------
+  function getACPeople_success(names){
+    loadTreeWithNames(peopleNameTree,names);
+  }
+  
+  function getACPlaces_success(names){
+    loadTreeWithNames(placeNameTree,names);
+  }
+  
+  function clearCustom_success(){
+    outputTable([[""],[""]]);
+  }
+  
+  function clearStaging_success(){
+    removeStagingFromHistDispl();
+  }
+  
+  function commitCustom_Success(historyEntryInfo){
+    addToHistDispl(historyEntryInfo);
+    setLocalState("ready"); 
+  }
+  
+  function expandRows_success(steps,index){
+    correctHistRefs(steps,-1*index);
+    hide($("#loading-box"));
+  }
+  
+  function expandCols_success(incrementedLkRange){
+    $(".selected-history-entry").attr("data-lkRange",incrementedLkRange);
+  }
+  
+  function historyEntryDeleteSuccess(successData){
+    hide($("#loading-box"));
+  }
+  
+  function failureCallback(error){
+   displayNotice("Oh shit! Something went wrong. Tell Joel. You can email him at joelliuscaesar@gmail.com or text him if you have his number. ");
+   console.log(error);
+  }
+  
+  function loadInputsFromServerSuccess(prevInputs){
+    if(prevInputs.returnCode === 0){
+      setInputsWithPreviousValues(prevInputs.fromInputSheet);
+    }
+  }
+  
+  function histEntriesGetSuccessThenSelect(entriesContainer){
+    if(entriesContainer.returnCode === 0||entriesContainer.returnCode === 6){
+      addHistEntriesBoxToPage(entriesContainer.historyRefs);
+      selectHistoryEntry($(".not-custom").first());
+    } 
+  }
+  
+  function getHistEntriesSuccess(entriesContainer){
+    if(entriesContainer.returnCode === 0||entriesContainer.returnCode === 6){
+      addHistEntriesBoxToPage(entriesContainer.historyRefs);
+    } 
+  }
+  
+  function sortSuccess(results){
+    if(results.returnCode === 0){
+      setLocalState("staging");
+      if(!$("#staging-history-entry").length){
+        addStagingToHistDispl();
+      }
+      else{
+        selectHistoryEntry($(".not-custom").first());
+      }
+    }
+    else if(results.returnCode === 1){
+      handleResultCodeDuplicates(results);
+    }
+    else if(result.returnCode === 2){
+      console.log("Empty inputs");
+    }
+    else if(result.returnCode === 5){
+      console.log("Empty Return");
+    }
+  }
+  
+  function resetSuccess(){
+    setLocalState("ready");
+    clearLocalInputs();
+    histEntriesBox$.empty();
+    hide(histEntriesBox$);
+    duplicatePersonChecker = new TwoWayDictionary();
+    duplicatePlaceChecker = new TwoWayDictionary();
+  }
+  
+  function commitStagingAndClearInputs(historyEntryInfo){
+    commitStagingToHistorySuccess(historyEntryInfo);    
+    clearLocalInputs();
+  }
+  
+  function commitStagingToHistorySuccess(historyEntryInfo){
+    addToHistDispl(historyEntryInfo);
+    removeStagingFromHistDispl();
+    setLocalState("ready");    
+  }
+  
+  function getHistoryDataSuccess(historyData){
+    outputTable(historyData.results);
+  }
+  
+  //end server success callbacks-----------------------------------------------------------------------------
+  
+  //input fields---------------------------------------------------------------------------------------------
+  function focusOnEntryCell(e){
+    const target$ = $(e.target);
+    var id = target$.attr("id");
+    
+    if(target$.is("input[type='text']")){
+      const duplicateChecker = getDuplicateChecker(getInputSectionAndIndex(id).section);
+      if(duplicateChecker.hasElement(id)){
+        duplicateChecker.deleteByValue(id);
+      }
+      prevEditValue = target$.val();
+    }
+    if(!$(e.delegateTarget).next().length){
+      appendNewCell($(e.delegateTarget));
+     }
+  }
+  
+  function appendNewCell(elem$){
+    if(!elem$){
+      return;
+    }
+    const clonedItem$ = $(elem$.clone());
+    incrementId(clonedItem$);
+    incrementIndex(clonedItem$,1);
+    const childInput$ = clonedItem$.children("input[type='text']");
+    childInput$.val("");
+    incrementId(childInput$);
+    const childSelect$ = clonedItem$.children("select");
+    if(childSelect$.length>0){
+      childSelect$.val("");
+      incrementId(childSelect$);
+    }
+    var parent = elem$.parent();
+    $(parent).append(clonedItem$[0]);
+    wireUpEventsToNewEntryElement(clonedItem$);
+    wireUpEventSpecificControls(clonedItem$);
+  }
+  
+  function focusOutOfInput(e){
+    const target$ = $(e.target);
+    var userInput = target$.val().trim();
+    var id = target$.attr("id");
+    var extractedInfo = getInputSectionAndIndex(id);
+    var column = getSectionColumn(extractedInfo.section);
+    if(column === -1) throw "section mismatch";
+    if(elementIsGenderSelect(target$)){
+      google.script.run.withFailureHandler(failureCallback).saveCellValue(userInput,extractedInfo.index,column);
+      return;
+    }
+    if(!userInput){ //if userInput is empty
+      if(prevEditValue){ //but the cell had a previous value
+        google.script.run.withFailureHandler(failureCallback).saveCellValue(userInput,extractedInfo.index,column);
+      } 
+      if(target$.hasClass("error-input")){ // we don't care about duplicate empty strings
+        target$.removeClass("error-input");
+        dupErrorCounter.count(-1);
+      }
+      return;
+    }
+    if(!checkAndMarkCellIfDuplicate(target$,userInput,extractedInfo,id)){
+      google.script.run.withFailureHandler(failureCallback).saveCellValue(userInput,extractedInfo.index,column);
+    }
+    insertNameLookup(userInput,target$.attr("data-section"));
+  }
+  
+  function checkAndMarkCellIfDuplicate(elem$,userInput,extractedInfo,id){
+    var duplicateChecker = getDuplicateChecker(extractedInfo.section);
+    var kName = makeStrKeySafe(userInput);
+    if(duplicateChecker.hasElement(kName)&&duplicateChecker.getValueForKey(kName) !== id){
+      elem$.addClass("error-input");
+      dupErrorCounter.count(1);
+      return true;
+    }
+    else{
+      duplicateChecker.setKeyAndValue(kName,id);
+      elem$.removeClass("error-input");
+      dupErrorCounter.count(-1);
+      return false
+    }
+  }
+  
+  function getDuplicateChecker(entrySection){
+    if(entrySection === "person-field-name"){
+      return duplicatePersonChecker;
+    }
+    else if(entrySection === "place-field-name"){
+      return duplicatePlaceChecker;
+    }
+    else if(entrySection === "person-field-gender"){
+      return null;
+    }
+    else{
+      throw "section mismatch in frontend: " + entrySection;
+    }
+  }
+  
+  function clearLocalInputs(){
+    $(".person-field input[type='text']").val("");
+    $(".person-field select").val("");
+    $(".place-field input[type='text']").val("");
+    output$.html("");
+  }
+  
+  function elementIsGenderSelect(elem$){
+    return elem$.is("select");
+  }
+  
+  function scoopAllInputs(){
+    var persons = [];
+    var places = [];
+     $(".person-field").each(function(i,e){
+       const e$ = $(e);
+       var name = e$.children("input[type='text']").val();
+       if(name){
+         var gender = e$.children("select").val();
+         var id = e$.attr("id");
+         persons.push({"name":name,"gender":gender,"elementId":id});
+       }
+     });
+    
+    $(".place-field").each(function(i,e){
+      const e$ = $(e);
+      var name = e$.children("input[type='text']").val();
+      if(name){
+        var id = e$.attr("id");
+        places.push({"name":name,"elementId":id});
+      }
+    });
+    return {"persons":persons,"places":places};
+  }
+  
+  function handleResultCodeDuplicates(results){
+    dupErrorCount += results.idsForDuplicates.length;
+    results.idsForDuplicates.forEach(function(id){  
+      $("#" +id + " input[type='text']").addClass("error-input");
+    });
+    unhide($("#duplicate-error"));
+  }
+  
+    function setInputsWithPreviousValues(prevValues){
+    var currentPersonCell$ = $(".person-field").first();
+    var currentPlaceCell$ = $(".place-field").first();
+    for(var i=0;i<prevValues.length;i++){
+      var personName = prevValues[i][0];
+      var sGender = prevValues[i][1];
+      var placeName = prevValues[i][2];
+      currentPersonCell$.children("input[type='text']").val(personName);
+      currentPersonCell$.children("select").val(sGender);
+      currentPlaceCell$.children("input[type='text']").val(placeName);
+      
+      duplicatePersonChecker.setKeyAndValue(makeStrKeySafe(personName),currentPersonCell$.children("input[type='text']").attr("id"));
+      duplicatePlaceChecker.setKeyAndValue(makeStrKeySafe(placeName), currentPlaceCell$.children("input[type='text']").attr("id"));
+      
+      if(personName||sGender){
+        if(!currentPersonCell$.next().length){
+          appendNewCell(currentPersonCell$);
+        }
+        currentPersonCell$ = currentPersonCell$.next();
+      }
+      
+      if(placeName){
+        if(!currentPlaceCell$.next().length){
+          appendNewCell(currentPlaceCell$);
+        }
+        currentPlaceCell$ = currentPlaceCell$.next();
+      }
+    }
+
+    if(!currentPersonCell$.next().length){
+      appendNewCell(currentPersonCell$);
+    }
+    if(!currentPlaceCell$.next().length){
+      appendNewCell(currentPlaceCell$);
+    }
+  }
+  //end input fields---------------------------------------------------------------------------------------------
+  
+  //history-entries-box------------------------------------------------------------------------------------------
+  function correctHistAttrs(changeLength,index){
+    var entry$ = $(".not-staging").eq(index);
+    while(entry$.length){
+      incrementId(entry$,-1);
+      incrementIndex(entry$,-1);
+      var shiftedRange = getIncrementedA1Range(entry$.attr("data-lkRange"),changeLength,changeLength);
+      entry$.attr("data-lkRange",shiftedRange);
+      entry$ = entry$.prev(".not-staging");
+    }
+    var selectedLkRange = $(".selected-history-entry").attr("data-lkRange");
+  }
+  
+  function correctHistRefs(changeLength,index){
+    var entry$ = $(".not-staging").eq(index);
+    var lkRange = entry$.attr("data-lkRange");
+    var shiftedRange = getIncrementedA1Range(lkRange,0,changeLength);
+    entry$.attr("data-lkRange",shiftedRange);
+    entry$ = entry$.prev(".not-staging");
+    while(entry$.length){
+      lkRange = entry$.attr("data-lkRange");
+      shiftedRange = getIncrementedA1Range(lkRange,changeLength,changeLength);
+      entry$.attr("data-lkRange",shiftedRange);
+      entry$ = entry$.prev(".not-staging");
+    }
+    var selectedLkRange = $(".selected-history-entry").attr("data-lkRange");
+  }
+  
+  function addToHistDispl(historyEntryInfo){
+    addLocalHistoryEntryRef(historyEntryInfo);
+    histEntriesBox$.remove("#staging-history-entry");
+    selectHistoryEntry($(".not-custom").first());
+  }
+  
+  function addStagingToHistDispl(){
+    histEntriesBox$.prepend(stagingHistoryEntry);
+    const added$ = histEntriesBox$.children(":first");
+    added$.click(historyEntrySelect);
+    selectHistoryEntry(added$);
+    unhide(histEntriesBox$);
+  }
+  
+  function removeStagingFromHistDispl(){
+    removeFromHistDispl($("#staging-history-entry"));
+  }
+  
+  function removeFromHistDispl(entry$){
+    entry$.remove();
+    var notCustom$ = $(".not-custom");
+    if(notCustom$.length){
+      selectHistoryEntry(notCustom$.first());
+    }
+    else{
+      selectHistoryEntry($("#custom-history-entry"));
+    }
+  }
+  
+  function addLocalHistoryEntryRef(historyEntryInfo){
+    const firstNotStaging$ = $(".not-staging").first();
+    var entryOptionStr = buildSingleHistoryEntryOption(historyEntryInfo.a1Range,convertToDateString(historyEntryInfo.currentDate),(firstNotStaging$.attr("data-index")*1)+1);
+    firstNotStaging$.before(entryOptionStr); 
+    const added$ = $(".not-staging").first();
+    added$.click(historyEntrySelect);
+    const entriesBox$ = $("#history-entries-box");
+	const elements$AndProps = [{elem$:entriesBox$,colorProp:"border-color"},{elem$: added$,colorProp:"background-color" }];
+    entriesBox$.css({"border-width":"5px","border-style":"solid"});
+    fadeOutColor(elements$AndProps,117,100,83);  
+  }
+  
+  function historyEntrySelect(e){
+    selectHistoryEntry($(e.target));
+  }
+  
+  function selectHistoryEntry(target$){
+    $(".selected-history-entry").removeClass("selected-history-entry");
+    target$.addClass("selected-history-entry");
+    selectionUIchange(target$.attr("id"));
+    google.script.run.withSuccessHandler(getHistoryDataSuccess)
+      .withFailureHandler(failureCallback)
+      .getHistoryEntryData(target$.attr("data-lkRange"));
+  }
+  
+  function addHistEntriesBoxToPage(entries){
+      const entryOptions = buildHistoryEntriesStr(entries);
+      histEntriesBox$.append(entryOptions);
+      $(".history-entries").click(historyEntrySelect);
+      unhide(histEntriesBox$);
+  }
+  
+  function buildHistoryEntriesStr(entries){
+    var selectOptions = "";
+    if(globalState === "staging"){
+      selectOptions += stagingHistoryEntry;
+    }
+    selectOptions += customHistoryEntry;
+    if(entries&&entries.length){
+      for(var i=entries.length-1;i>=0;i--){
+        var lkRange = entries[i][0];
+        var storedDate = convertToDateString(entries[i][1]);
+        selectOptions += buildSingleHistoryEntryOption(lkRange,storedDate,i+1);
+      }
+    }
+    return selectOptions;
+  }
+  
+  function buildSingleHistoryEntryOption(lkRange,storedDate,rowNum){
+    return "<div id='history-entry"+rowNum+"' class='history-entries not-staging not-custom' data-lkRange='"+lkRange +"' data-index='"+rowNum+"'>"+storedDate+"</div>";
+  }
+  
+  function selectionUIchange(id){
+    if(id == "staging-history-entry"){
+      unhide(newSortSame$);
+      unhide(newSortEmpty$);
+      unhide(clearStaging$);
+      hide(commitCustom$);
+      hide(clearCustom$);
+    }
+    else if(id == "custom-history-entry"){
+      hide(newSortSame$);
+      hide(newSortEmpty$);
+      hide(clearStaging$);
+      unhide(commitCustom$);
+      unhide(clearCustom$);
+    }
+    else{
+      hide(newSortSame$);
+      hide(newSortEmpty$);
+      hide(clearStaging$);
+      hide(commitCustom$);
+      hide(clearCustom$);
+    }
+  }
+  //end history-entries-box---------------------------------------------------------------------------------
+  
+  function fadeOutColor(elements$AndProps,hue,sat,light){
+    var t = 100;
+    var allPromises = [];
+    for(var percent = light;percent < 100;percent += .01){
+      	t+= 1;
+    	allPromises.push(new Promise(function(resolve,reject){
+          (function(ii,tt){	
+            setTimeout(function(){
+              elements$AndProps.forEach(function(item){
+                item.elem$.css(item.colorProp,"hsl("+hue+","+sat+"%,"+ii+"%)");
+              });
+              resolve();
+            },tt);      
+          })(percent,t);
+        }));  
+    }
+    Promise.all(allPromises).then(function(){
+      elements$AndProps.forEach(function(item){
+        item.elem$.css(item.colorProp,"");
+      });
+      $("#history-entries-box").css({"border-width":"","border-style":""});
+    },
+    function(reason) {
+      console.log(reason); // Error!
+    });
+  }
+  
+  //common utilities------------------------------------------------------------------------------------------
+  function incrementIndex(elem$,incrementSize){
+    var incrementedIndex = (elem$.attr("data-index")*1)+incrementSize;
+    elem$.attr("data-index",incrementedIndex);
+  }
+  
+  function incrementId(elem$,incrementSize){
+    if(!elem$){
+      return;
+    }
+    if(!incrementSize){
+      incrementSize = 1
+    }
+    var prevId = elem$.attr("id");
+    elem$.attr("id",getNextId(prevId,incrementSize));
+  }
+  
+  function getNextId(prevId,incrementSize){
+    if(!prevId){
+      return;
+    }
+    if(!incrementSize){
+      incrementSize = 1
+    }
+    var rgx = /\d+$/;
+    var numPart = (prevId.match(rgx)[0]) >>>0;
+    numPart += incrementSize;
+    return prevId.replace(rgx,numPart);
+  }
+  
+  function getInputSectionAndIndex(elementId){
+    var rgx = /([A-Za-z\-_0-9]+[A-Za-z\-_]+)(\d+)$/;
+    var matches = elementId.match(rgx);
+    return {"section":matches[1],"index":matches[2]};
+  }
+  
+  function makeStrHTMLSafe(str){
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/,"&quot;").replace(/'/g,"&#39;");
+  }
+  
+  function getRowColCoordinatesFromId(elemId){
+    var m = elemId.match(/result-row(\d+)-col(\d+)/);
+    return {"row":m[1],"col":m[2]};
+  }
+  
+  function convertToDateString(msSince1970UTC){
+    const d = new Date();
+    d.setTime(msSince1970UTC);
+    const dateOptions = {hour:"2-digit",minute:"2-digit",timeZoneName:"short"};
+    return d.toLocaleDateString("en-US",dateOptions);
+    
+  }
+  
+  function trimFrontNumbers(str){
+    str = str?str:"";
+    return str.replace(/^[0-9\.]+/,"");
+  }
+  
+  function makeStrKeySafe(str){
+    var frontnumbersTrimed = trimFrontNumbers(str);
+    var regexedStr = frontnumbersTrimed.replace(/[^A-Za-z0-9]/gi,'');
+    return regexedStr.toLowerCase();
+  }
+  
+  function hide(elem$){
+    elem$.addClass("hidden");
+  }
+  
+  function unhide(elem$){
+    elem$.removeClass("hidden");
+  }
+  
+  function getSectionColumn(section){
+    return (section === "person-field-name")?1:(section === "person-field-gender")?2:
+      (section === "place-field-name")?3:-1;
+  }
+  
+  function getIncrementedA1Range(a1Range,topSteps,bottomSteps,frontSteps,backSteps){
+    const rangeInfo = getA1RangeInfo(a1Range);
+    var firstCol = frontSteps?convertToCol(convertToNum(rangeInfo.firstCol + frontSteps)):rangeInfo.firstCol;
+    var lastCol = backSteps?convertToCol(convertToNum(rangeInfo.lastCol + backSteps)):rangeInfo.lastCol;
+    var firstRow = topSteps?topSteps + rangeInfo.firstRow:rangeInfo.firstRow;
+    var lastRow = bottomSteps?bottomSteps + rangeInfo.lastRow: rangeInfo.lastRow;
+    
+    return firstCol+firstRow+":"+lastCol+lastRow; 
+  }
+  
+  function getA1RangeInfo(a1Range){
+    const rgx = /([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)/;
+    var matches = a1Range.match(rgx);
+    if(matches){
+      return {"firstCol":matches[1]
+              ,"firstRow":matches[2]*1
+              ,"lastCol":matches[3]
+              ,"lastRow":matches[4]*1};
+    }
+    else{
+      return null;
+    }
+  }
+  
+  function convertToCol(num) {
+    if (num < 1) throw new Error("num is less than 1: " + num);
+    const keyCodeLB = 65;
+    const base = 26;
+    output = [];
+    while (num) {
+      var m = ((num-1) % base);
+      num -= m;
+      num = (num / base) >>> 0;
+      output.push(String.fromCharCode(keyCodeLB + m));
+    }
+    return output.reverse().join("");
+  }
+  
+  function convertToNum(A1){
+    var sum = 0;
+    const base = 26;
+    const keyCodeLB = 65;
+    for(var i = 0;i<A1.length;i++){
+      var pow = A1.length - i - 1;
+  	  var charValue = Math.pow(base,pow)*(A1.charCodeAt(i)-keyCodeLB +1); 
+      sum += charValue;
+    }
+    return sum;
+  }
+  
+  function loadTreeWithNames(tree,names){
+    for(var i = 0;i<names.length;i++){
+      tree.push(names[i]);
+    }
+  }
+  
+  function safeBindEvent(element$,event,callback){
+    element$.off(event,callback);
+    element$.on(event,callback);
+  }
+  // end common utilities------------------------------------------------------------------------------------------------------------------
+  
+  //pop-ups--------------------------------------------------------------------------------------------------------------------------------
+  const popUpQueue = [];
+  var isModalOpen = false;
+  function displayNotice(noticeText){
+    if(!isModalOpen){
+      isModalOpen = true;
+      displayAction([noticeText]);
+    }
+    else{
+      popUpQueue.push({"callback":displayAction,"displArgs":[noticeText]});
+    }   
+  }
+  
+  function displayAction(displArgs){
+    if(!$("#prevent-extra-popups").prop("checked")){
+      const modalWindow$ = $("#notice-box");
+      unhide(modalWindow$);
+      const modalContent$ = $("#notice-inner-content");
+      modalContent$.append("<div>"+makeStrHTMLSafe(displArgs[0])+"<\div>");
+      modalContent$.append("<div id='modal-buttons'><button type='button' id='modal-close' class='default-button notice-button'><span>Close</span></button></div>");
+      $("#modal-close").click(closeModal); 
+    }
+    else{
+      isModalOpen = false;
+    }
+  }
+  
+  function closeModal(e){
+      $("#notice-inner-content").empty();
+      hide($("#notice-box"));
+      if(popUpQueue.length){
+        var displCallInfo = popUpQueue.shift();
+        displCallInfo.callback(displCallInfo.displArgs);
+      }
+      else{
+        isModalOpen = false;
+      }
+    }
+    
+  //end pop-ups----------------------------------------------------------------------------------------------------------------------------
+  
+  function TwoWayDictionary(){
+    var defaultDict = {};
+    var converseDict = {};
+    this.setKeyAndValue = setKeyAndValue;
+    this.getValueForKey = getValueForKey;
+    this.getKeyForValue = getKeyForValue;
+    this.hasElement = hasElement
+    this.deleteByKey = deleteByKey;
+    this.deleteByValue = deleteByValue;
+    
+    function setKeyAndValue(key,value){
+      defaultDict[key] = value;
+      converseDict[value] = key;
+    }
+    function getValueForKey(key){
+      return defaultDict[key];
+    }
+    function getKeyForValue(value){
+      return converseDict[value];
+    }
+    function hasElement(e){
+      return (e in defaultDict||e in converseDict);
+    }
+    function deleteByKey(key){
+      var v = defaultDict[key];
+      delete converseDict[v];
+      delete defaultDict[key];
+    }
+    function deleteByValue(value){
+      var k = converseDict[value];
+      delete defaultDict[k];
+      delete converseDict[value];
+    }    
+  }
+  
+  function DuplicateErrorCounter(){
+    var dupErrorCount = 0;
+    this.count = count;
+    function count(hits){
+      if(!dupErrorCount&&hits < 0){
+        return;
+      }
+      dupErrorCount += hits;
+      showErrorMessageForDuplicates();
+    }
+    function showErrorMessageForDuplicates(){
+      if(dupErrorCount){
+        unhide($("#duplicate-error"));
+      }
+      else{
+        hide($("#duplicate-error"));
+      }
+    }
+  }
+  
+  function Trie(ignoreCase) {
+    this.letters = [];
+    this.suffixes = [""];
+    this.index = 0;
+    this._ignoreCase = ignoreCase && true;
+  }
+
+  Trie.prototype.push = function(str) {
+    if (!str) return;
+    if (!this.search(str)) {
+      this.suffixes.push(str);
+      var first = str.charAt(0);
+      if (this._ignoreCase) first = first.toLowerCase();
+      if (first in this) {
+        var child = this[first];
+      } else {
+        var child = new Trie(this._ignoreCase);
+        this[first] = child;
+        this.letters.push(first);
+      }
+      child.push(str.substring(1));
+    }
+  };
+
+  Trie.prototype.getMatch = function(str) {
+    if (!str) {
+      return this;
+    } else {
+      var first = str.charAt(0);
+      if (this._ignoreCase) first = first.toLowerCase();
+      if (first in this) {
+        var child = this[first];
+        return child.getMatch(str.substring(1));
+      } else {
+        return new Trie(this._ignoreCase);
+      }
+    }
+  };
+  
+  Trie.prototype.delete = function(str) {
+    if (!str) return;
+    var first = str.charAt(0);
+    if (this._ignoreCase) first = first.toLowerCase();
+    if (first in this) {
+      this.suffixes = this.suffixes.filter(function(e) {
+        return e !== str
+      });
+      var child = this[first];
+      child.delete(str.substring(1));
+      if (child.suffixes.length === 1) { //there should at least be an empty string
+        delete this[first];
+      }
+
+    }
+  };
+
+  Trie.prototype.search = function(str) {
+    if (!str) return true;
+    var first = str.charAt(0);
+    if (this._ignoreCase) first = first.toLowerCase();
+    if (first in this) {
+      var child = this[first];
+      return child.search(str.substring(1));
+    } else {
+      return false;
+    }
+  };
+
+  Trie.prototype.next = function() {
+    this.index = (++this.index) % this.suffixes.length;
+    var suffix = this.suffixes[this.index];
+    return suffix;
+  };
+  
+})();
+
+</script>
+
+

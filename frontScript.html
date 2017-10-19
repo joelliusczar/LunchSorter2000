@@ -1,0 +1,1354 @@
+<script>
+
+(function (){
+  //global vars------------------------------------------------------------------------------------------------
+  var entryBoxNum = 0;
+  var prevEditValue = "";
+  var globalState = "";
+  const stagingHistoryEntry = "<div id='staging-history-entry' class='history-entries not-custom' data-lkRange='0'>Current</div>";
+  const customHistoryEntry = "<div id='custom-history-entry' class='history-entries' data-lkRange='1'>Custom</div>";
+  const suggestionSpan = "<span class='suggestion' contenteditable='false'></span>"
+  var emptyFunc = function(){};
+  const annoyingKeyCodes = {"BACKSPACE":8
+                           ,"TAB":9
+                           ,"ENTER":13
+                           ,"SHIFT":16
+                           ,"OPTION": 18
+                           ,"ESC":27
+                           ,"UP_KEY":40
+                           ,"DOWN_KEY":38
+                           ,"RIGHT_KEY":39
+                           ,"DEL":46
+                           ,"COMMAND":93
+                           };
+  var duplicatePersonChecker = new TwoWayDictionary();
+  var duplicatePlaceChecker = new TwoWayDictionary();
+  const dupErrorCounter = new DuplicateErrorCounter();
+  const peopleNameTree = new Trie(true);
+  const placeNameTree = new Trie(true);
+  const tableCache = {};
+  
+  const sort$ = $("#sort");  
+  const newSortSame$ = $("#newSortSame");
+  const clearInputs$ = $("#clearInputs");
+  const commitCustom$ = $("#commitCustom");
+  const clearCustom$ = $("#clearCustom");
+  const clearStaging$ = $("#clearStaging");
+  const deleteEntry$ = $("#deleteEntry");
+  const output$ = $("#output");
+  var histEntriesBox$ = $("#history-entries-box");
+  //end global vars------------------------------------------------------------------------------------------
+  
+  //global events----------------------------------------------------------------------------------------------
+  
+  safeBindEvent(sort$,"click",function(e){
+    var inputs = scoopAllInputs();
+    serverCall(sort_success).processInputs(inputs);
+  });
+  
+  safeBindEvent(newSortSame$,"click",function(e){
+    serverCall(commitStagingToHistorySuccess).commitStagingToHistory(false);
+  });
+  
+  safeBindEvent(clearInputs$,"click",function(e){
+    serverCall(clearInputs_success).clearInputs();
+  });
+  
+  safeBindEvent($("#resetApp"),"click",function(e){
+    displayYesNoChoice("Are you sure you want to reset all your settings with this app?",function(e){
+      serverCall(reset_success).resetAll();
+    });
+  });
+  
+  safeBindEvent(deleteEntry$,"click",function(e){
+    var selected$ = $(".selected-history-entry");
+    var lkRange = selected$.attr("data-lkRange");
+    if(lkRange ==="0"){
+      displayNotice("Cannot delete the \"Current\" entry");
+    }
+    else{
+    //delete this shit
+//      var prev$ = selected$.prev(".history-entries");
+//      if(prev$.length){
+//        selectHistoryEntry(prev$);
+//      }
+//      else{
+//        var next$ = selected$.next(".history-entries");
+//        if(next$.length){
+//          selectHistoryEntry(next$);
+//        }
+//        else{
+//          hide(output$);
+//          hide(histEntriesBox$);
+//        }
+//      }
+      var deletedRangeInfo = getA1RangeInfo(lkRange);
+      var changeLength = deletedRangeInfo.lastRow - deletedRangeInfo.firstRow +1;
+      var index = selected$.attr("data-index")*1;
+      correctHistAttrs(-1*changeLength,-1*index);
+      selected$.remove();
+      hide($("#output-controls"));
+      serverCall(historyEntryDeleteSuccess).deleteHistoryEntry(lkRange,index);
+    }
+  });
+  
+  safeBindEvent($("#add-col"),"click",function(e){
+    addEmptyColumn();
+  });
+  
+  safeBindEvent($("#add-row"),"click",function(e){
+    const lastRow$ = output$.find("tr").last();
+    const selected$ = $(".selected-history-entry");
+    var row = lastRow$.attr("data-row")*1;
+    var index = selected$.attr("data-index");
+    $("#output-table").append(buildEmptyRow(lastRow$.find("td").length,row+1));
+    safeBindEvent(output$.find("tr").last().find(".outputCell"),"click",tableCellClick);
+    var lkRange = selected$.attr("data-lkRange");
+    if(lkRange != "0" && lkRange != "1"){
+      unhide($("#loading-box"));
+      severCall(expandRows_success,{"index":index}).expandRowCount(index,1);
+    }
+  });
+  
+  safeBindEvent(commitCustom$,"click",function(e){
+    serverCall(commitCustom_Success).commitCustomToHistory();
+  });
+  
+  safeBindEvent(clearCustom$,"click",function(e){
+    serverCall(clearCustom_success).clearCustom();
+  });
+  
+  safeBindEvent(clearStaging$,"click",function(e){
+    serverCall(clearStaging_success).clearStaging();
+  });
+  
+  wireUpEventsToNewEntryElement($(".person-field"));
+  wireupSpecificKeydown($(".person-field").children(".txtBox"));
+  wireUpEventsToNewEntryElement($(".place-field"));
+  wireupSpecificKeydown($(".place-field").children(".txtBox"));
+  
+  safeBindEvent($(".close"),"click",closeModal);
+  //end global events------------------------------------------------------------------------------------------
+  
+  //run--------------------------------------------------------------------------------------------------------
+  handleMigrations();
+  loadStateFromServer();
+  loadInputsFromServer();
+  loadAutoCompleteData();
+  //end run----------------------------------------------------------------------------------------------------
+  
+  //reused events----------------------------------------------------------------------------------------------
+  function nameInputsKeyDown(e){
+    const suggestion$ = $(e.target).children(".suggestion");
+    if(e.which===annoyingKeyCodes.UP_KEY //up or down keys to prevent scrolling while incrementing through name suggestions
+     ||e.which===annoyingKeyCodes.DOWN_KEY
+     ||e.which===annoyingKeyCodes.BACKSPACE&&suggestion$.text().length){ 
+      e.preventDefault();
+    }
+    const target$ =  $(e.target);
+    var userText = target$.text();
+    if(e.which===annoyingKeyCodes.RIGHT_KEY&&suggestion$.text().length){
+      target$.empty();
+      target$.html(userText+suggestionSpan);
+      moveCaretToPosition(target$[0],5);
+      return;
+    }
+    if(e.which===annoyingKeyCodes.DEL){
+      serverCall(deleteName_success).deleteNameLookup(userText,target$.attr("data-section"));
+    }
+    if(e.which===annoyingKeyCodes.TAB) return;
+    suggestion$.text("");
+  }
+  
+  function autoComplete(keydownEvntObj,root){
+    if(isKeyAutocompleteBlocked(keydownEvntObj.which)) return;
+    const target$ = $(keydownEvntObj.target);
+    var prefix = target$.text();
+    var node = root.getMatch(prefix);
+	target$.children(".suggestion").text(node.next());
+  }
+  
+  function isDelete(keycode){
+    return keycode===annoyingKeyCodes.BACKSPACE||keycode===annoyingKeyCodes.DEL;
+  }
+  
+  function isKeyAutocompleteBlocked(keycode){
+    return keycode===annoyingKeyCodes.SHIFT //pressing shift causes it to iterate when we only want to capitalize
+           ||keycode===annoyingKeyCodes.BACKSPACE
+           ||keycode===annoyingKeyCodes.TAB
+           ||keycode===annoyingKeyCodes.OPTION
+           ||keycode===annoyingKeyCodes.COMMAND
+           ||keycode===annoyingKeyCodes.DEL;
+  }
+  
+  function wireupSpecificKeydown(element$){
+    if(element$.attr("data-section")==="person"){
+      wireupKeyupForPeople(element$);
+    }
+    else if(element$.attr("data-section")==="place"){
+      wireupKeyupForPlaces(element$);
+    }
+  }
+  
+  function wireupKeyupForPeople(element$){
+    safeBindEvent(element$,"keyup",peopleInputKeyUp);
+  }
+  
+  function wireupKeyupForPlaces(element$){
+    safeBindEvent(element$,"keyup",placeInputKeyUp);
+  }
+  
+  function peopleInputKeyUp(e){
+    autoComplete(e,peopleNameTree);
+  }
+  
+  function placeInputKeyUp(e){
+    autoComplete(e,placeNameTree);
+  }
+  
+  function insertPersonLookup(name){
+    if(!peopleNameTree.search(name)){
+      peopleNameTree.push(name);
+      serverCall(emptyFunc).insertNameLookup(name,"person");
+    }
+  }
+  
+  function insertPlaceLookup(name){
+    if(!placeNameTree.search(name)){
+      placeNameTree.push(name);
+      serverCall(emptyFunc).insertNameLookup(name,"place");
+    }
+  }
+  
+  function insertNameLookup(name,section){
+    if(section==="person"){
+      insertPersonLookup(name);
+    }else if(section === "place"){
+      insertPlaceLookup(name);
+    }
+  }
+  
+  function inputEscapeKeydown(e){
+    if(e.which===annoyingKeyCodes.ENTER||e.which===annoyingKeyCodes.ESC){
+      const next = $(e.target).next(".tabTo");
+      if(next.length){
+        next.focus();
+      }
+      else{
+        $(e.target).focusout();
+      }
+    }
+  }
+  
+  function moveCaretToPosition(txtBox,position){
+    var range = document.createRange();
+    range.setStart(txtBox,1);
+    range.collapse(true);
+    var selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  //end-reused events
+    
+  //page load----------------------------------------------------------------------------------------------
+  function wireUpEventsToNewEntryElement(element$){
+    safeBindEvent(element$,"focusin",focusOnEntryCell);
+    if(element$.children("select").length){
+      safeBindEvent(element$.children("select"),"focusout",focusOutOfInput);
+    }
+    var txtBox$ = element$.children(".txtBox");
+    safeBindEvent(txtBox$,"focusout",focusOutOfInput);
+    txtBox$.html(suggestionSpan);
+    safeBindEvent(txtBox$,"keydown",inputEscapeKeydown);
+    safeBindEvent(txtBox$,"keydown",nameInputsKeyDown);
+  }
+  
+  function loadInputsFromServer(){
+    serverCall(loadInputsFromServerSuccess).getPreviousInputs();
+  }
+  
+  function loadStateFromServer(){
+    serverCall(getState_success).getState();
+  }
+  
+  function loadHistoryRefs(){
+    serverCall(getHistEntriesSuccess).getAllHistoryReferences();
+  }
+  
+  function loadHistoryRefsThenSelect(){
+    serverCall(histEntriesGetSuccessThenSelect).getAllHistoryReferences();
+  }
+  
+  function handleMigrations(){
+    unhide($("#loading-box"));
+    serverCall(migration_success).handleMigrations();
+  }
+  
+  function setLocalState(state){
+    globalState = state;
+    if(state==="ready"){
+      sort$.children("span").html("Sort people into parties");     
+    }
+    else if(state==="staging"){
+      sort$.children("span").html("Sort again without saving");
+    }
+    else{
+      throw new Error("Invalid state was returned from the sever.");
+    }
+  }
+  
+  function loadAutoCompleteData(){
+   serverCall(getACPeople_success).getAllNames("person");
+   serverCall(getACPlaces_success).getAllNames("place");
+  }
+  //end page load------------------------------------------------------------------------------------------
+  
+  //output table ------------------------------------------------------------------------------------------
+  function outputTable(resultTbl){
+    if(!resultTbl||!resultTbl.length) return;
+    var output = buildTableStr(resultTbl);
+    wireUpTable(output);
+    unhide($("#output-controls"));
+  }
+  
+  function buildTableStr(resultTbl){
+    if(!resultTbl||!resultTbl.length) return "";
+    var output = "<table id='output-table' >";
+    output += buildHeaderRow(resultTbl[0]);
+    for(var i=1;i<resultTbl.length;i++){
+      output += buildTableRow(resultTbl[i],i+1);
+    }
+    output += "</table>";
+    return output;
+  }
+  
+  function wireUpTable(tableHtml){
+    output$.html(tableHtml);
+    $("body").height($("body").height() + output$.height());
+    safeBindEvent($(".outputCell"),"click",tableCellClick);
+  }
+  
+  function tableCellClick(e){
+    if(e.target !== e.delegateTarget) return; //prevent the click event from happening when you click on the inside textbox
+    makeCellEditable($(e.target));
+  }
+  
+  function leaveOutputCell(e){
+    sendUpdateValues($(e.target));
+  }
+  
+  function sendUpdateValues(target$){
+    var inputValue = target$.text().trim();
+    const parent$ = target$.parent();
+    parent$.addClass("non-editible");
+    const coordinates = getRowColCoordinatesFromId(parent$.attr("id"));
+    parent$.html(inputValue);
+    const selected$ = $(".selected-history-entry");
+    var lkRange = $(".selected-history-entry").attr("data-lkRange");
+    if(lkRange != "0" && lkRange != "1"){
+      var rangeDiff = coordinates.col - convertToNum(getA1RangeInfo(lkRange).lastCol);
+      if(rangeDiff > 0){
+        serverCall(expandCols_success).expandColCount(selected$.attr("data-index")*1,rangeDiff);
+      }
+    }
+    serverCall(emptyFunc).updateValueInResults(inputValue,coordinates.row,coordinates.col,selected$.attr("data-lkRange"));
+    insertNameLookup(inputValue,target$.attr("data-section"));    
+  }
+  
+  function makeCellEditable(elem$){
+    if(elem$.has("input").length){
+      return;
+    }   
+    var sPrevValue = makeStrHTMLSafe(elem$.html());
+    var section = elem$.attr("data-section");
+    var txtBox = ["<div",
+                  " contenteditable='true'",
+                  " class='editable-cell txtBox'",
+                  " data-section='" +section+"'>",
+                  sPrevValue+suggestionSpan,
+                  "</div>"].join("");
+    elem$.html(txtBox);
+    elem$.removeClass("non-editible");
+    var txtBox$ = elem$.children(".txtBox");
+    safeBindEvent(txtBox$,"focusout",leaveOutputCell);
+    txtBox$.focus();
+    safeBindEvent(txtBox$,"keydown",function(e){
+      if(e.which===13){ //if user presses the enter key
+        sendUpdateValues($(e.target));
+      }
+      nameInputsKeyDown(e);
+    });
+    safeBindEvent(txtBox$,"keydown",inputEscapeKeydown);
+    wireupSpecificKeydown(txtBox$);
+  }
+  
+  function buildTableRow(row,rowIndex){
+    var output = "<tr data-row='"+rowIndex+"'>";
+    row.forEach(function(cellValue,colIndex){
+      output += buildTableCell(cellValue,rowIndex,colIndex+1);
+    });
+    output += "</tr>";
+    return output;
+  }
+  
+  function buildEmptyRow(size,rowIndex){
+    var output = "<tr data-row='"+rowIndex+"'>";
+    for(var i = 1;i<=size;i++){
+      output += buildTableCell("",rowIndex,i);
+    }
+    output += "</tr>";
+    return output;
+  }
+  
+  function buildTableCell(cellValue,row,col){
+    return ["<td", 
+           " id='result-row",row+"-col"+col+"'",
+           " data-row='"+row+"'",
+           " data-col='"+col+"'",
+           " data-section='person'",
+           " class='outputCell regular-border non-editible cell'>",
+           cellValue,
+           "</td>"].join("");
+  }
+  
+  function buildHeaderRow(headerRow){
+    var output = "<tr id='header-row'>";
+    headerRow.forEach(function(headerValue,index){
+      output += buildHeaderCell(headerValue,index+1);
+    });
+    output += "</tr>";
+    return output;
+  }
+  
+  function addEmptyColumn(){
+    var rows$ = output$.find("tr");
+    rows$.each(function(i,elem){ 
+      var lastCell$ =$(elem).children().last();
+      var col = lastCell$.attr("data-col")*1;
+      if(i === 0){
+        lastCell$.after(buildHeaderCell("",col+1));
+      }
+      else{
+        lastCell$.after(buildTableCell("",i+1,col+1));
+      }
+      safeBindEvent(lastCell$.next(),"click",tableCellClick);
+    });
+  }
+  
+  function buildHeaderCell(cellValue,index){
+    return ["<th",
+    " id='result-row1-col"+index+"'",
+    " data-row='1'",
+    " data-col='"+index+"'",
+    " data-section='place'",
+    " class='outputCell regular-border cell'>",
+    cellValue,
+    "</th>"].join("");
+  }
+  //end output table----------------------------------------------------------------------------------------
+   
+  //server success callbacks--------------------------------------------------------------------------------
+  function callOnSuccess(callback,serverData,localData){
+    if(serverData&&serverData.returnCode===7){
+      displayNotice(["Oh no! You must've deleted the excel sheet that had all your data because it's gone."
+                    ," On the bright side, I'm creating a new one for you. Don't delete it again!"].join(""));
+    }
+    try{
+      callback(serverData,localData);
+    }
+    catch(err){
+        handleCommonError(err);
+    }
+  }
+  
+  function getState_success(serverData){
+    setLocalState(serverData.state);
+  }
+  
+  function deleteName_success(serverData){
+    if(serverData.section==="person"){
+      peopleNameTree.delete(serverData.name);
+    }
+    else if(serverData.section==="place"){
+      placeNameTree.delete(serverData.name);
+    }
+  }
+  
+  function getACPeople_success(serverData){
+    const names = serverData.names;
+    loadTreeWithNames(peopleNameTree,names);
+  }
+  
+  function getACPlaces_success(serverData){
+    const names = serverData.names;
+    loadTreeWithNames(placeNameTree,names);
+  }
+  
+  function clearCustom_success(){
+    outputTable([[""],[""]]);  
+  }
+  
+  function clearStaging_success(){
+    removeStagingFromHistDispl();
+    hide($("#output-controls"));
+  }
+  
+  function commitCustom_Success(historyEntryInfo){
+    addToHistDispl(historyEntryInfo);
+    setLocalState("ready");  
+  }
+  
+  function expandRows_success(serverData,localData){
+    const steps = serverData.steps;
+    const index = localData.index;
+    correctHistRefs(steps,-1*index);
+    hide($("#loading-box"));
+  }
+  
+  function expandCols_success(serverData){
+    const incrementedLkRange = serverData.incrementedLkRange
+    $(".selected-history-entry").attr("data-lkRange",incrementedLkRange);   
+  }
+  
+  function historyEntryDeleteSuccess(successData){
+    hide($("#loading-box")); 
+  }
+  
+  function failureCallback(serverError,localData){
+   displayNotice("Oh shit! Something went wrong. Tell Joel. You can email him at joelliuscaesar@gmail.com or text him if you have his number. ");
+   var error = "local stacktrace:\n"+(localData.stack||"") +"\nServer stacktrace: \n"+ serverError;
+   throw new Error(error);
+  }
+  
+  function loadInputsFromServerSuccess(prevInputs){
+    if(prevInputs.returnCode === 0){
+      setInputsWithPreviousValues(prevInputs.fromInputSheet);
+    }
+  }
+  
+  function histEntriesGetSuccessThenSelect(serverData){
+    if(serverData.returnCode === 0||serverData.returnCode === 6){
+      addHistEntriesBoxToPage(serverData.historyRefs);
+      selectHistoryEntry($(".not-custom").first());
+    }
+    else{
+     const customHistEntry$ = $("#custom-history-entry");
+     safeBindEvent(customHistEntry$,"click",historyEntryClick);
+     selectHistoryEntry(customHistEntry$);
+    } 
+  }
+  
+  function getHistEntriesSuccess(entriesContainer){
+    if(entriesContainer.returnCode === 0||entriesContainer.returnCode === 6){
+      addHistEntriesBoxToPage(entriesContainer.historyRefs);
+    }
+  }
+  
+  function sort_success(serverData){
+    if(serverData.returnCode === 0){
+      setLocalState("staging");
+      if(!$("#staging-history-entry").length){
+        addStagingToHistDispl();
+      }
+      else{
+        selectHistoryEntry($(".not-custom").first());
+      }
+    }
+    else if(serverData.returnCode === 1){
+      handleResultCodeDuplicates(serverData);
+    }
+    else if(serverData.returnCode === 2){
+      console.log("Empty inputs");
+    }
+    else if(serverData.returnCode === 5){
+      displayNotice("User Error: There was nothing to sort with.");
+    }
+  }
+  
+  function reset_success(){
+    setLocalState("ready");
+    clearLocalInputs();
+    histEntriesBox$.empty();
+    addCustomToHistDispl();
+    selectHistoryEntry($("#custom-history-entry"));
+    duplicatePersonChecker = new TwoWayDictionary();
+    duplicatePlaceChecker = new TwoWayDictionary(); 
+  }
+  
+  function clearInputs_success(){   
+    clearLocalInputs(); 
+  }
+  
+  function commitStagingToHistorySuccess(historyEntryInfo){
+    addToHistDispl(historyEntryInfo);
+    removeStagingFromHistDispl();
+    hide($("#output-controls"));
+    setLocalState("ready"); 
+  }
+  
+  function getHistoryDataSuccess(historyData){
+    outputTable(historyData.results);
+  }
+  
+  function migration_success(){
+    loadHistoryRefsThenSelect();
+    hide($("#loading-box"));  
+  }
+  
+  //end server success callbacks-----------------------------------------------------------------------------
+  
+  //input fields---------------------------------------------------------------------------------------------
+  function focusOnEntryCell(e){
+    const target$ = $(e.target);
+    var id = target$.attr("id");
+    
+    if(target$.is(".txtBox")){
+      const duplicateChecker = getDuplicateChecker(getInputSectionAndIndex(id).section);
+      if(duplicateChecker.hasElement(id)){
+        duplicateChecker.deleteByValue(id);
+      }
+      prevEditValue = target$.text();
+    }
+    if(!$(e.delegateTarget).next().length){
+      appendNewCell($(e.delegateTarget));
+     }
+  }
+  
+  function appendNewCell(elem$){
+    if(!elem$){
+      return;
+    }
+    const clonedItem$ = $(elem$.clone());
+    incrementId(clonedItem$);
+    incrementIndex(clonedItem$,1);
+    const childInput$ = clonedItem$.children(".txtBox");
+    childInput$.val("");
+    incrementId(childInput$);
+    const childSelect$ = clonedItem$.children("select");
+    if(childSelect$.length>0){
+      childSelect$.val("");
+      incrementId(childSelect$);
+    }
+    var parent = elem$.parent();
+    $(parent).append(clonedItem$[0]);
+    wireUpEventsToNewEntryElement(clonedItem$);
+    wireupSpecificKeydown(childInput$);
+  }
+  
+  function focusOutOfInput(e){
+    const target$ = $(e.target);
+    var userInput = target$.text().trim();
+    var id = target$.attr("id");
+    var extractedInfo = getInputSectionAndIndex(id);
+    var column = getSectionColumn(extractedInfo.section);
+    if(column === -1) throw "section mismatch";
+    if(elementIsGenderSelect(target$)){
+      var selGender = target$.val();
+      serverCall(emptyFunc).saveCellValue(selGender,extractedInfo.index,column);
+      return;
+    }
+    else{
+      target$.empty();
+      target$.html(userInput+suggestionSpan);
+    }
+    if(!userInput){ //if userInput is empty
+      if(prevEditValue){ //but the cell had a previous value
+        serverCall(emptyFunc).saveCellValue(userInput,extractedInfo.index,column);
+      } 
+      if(target$.hasClass("error-input")){ // we don't care about duplicate empty strings
+        target$.removeClass("error-input");
+        dupErrorCounter.count(-1);
+      }
+      return;
+    }
+    if(!checkAndMarkCellIfDuplicate(target$,userInput,extractedInfo,id)){
+      serverCall(emptyFunc).saveCellValue(userInput,extractedInfo.index,column);
+    }
+    insertNameLookup(userInput,target$.attr("data-section"));
+  }
+  
+  function checkAndMarkCellIfDuplicate(elem$,userInput,extractedInfo,id){
+    var duplicateChecker = getDuplicateChecker(extractedInfo.section);
+    var kName = makeStrKeySafe(userInput);
+    if(duplicateChecker.hasElement(kName)&&duplicateChecker.getValueForKey(kName) !== id){
+      elem$.addClass("error-input");
+      dupErrorCounter.count(1);
+      return true;
+    }
+    else{
+      duplicateChecker.setKeyAndValue(kName,id);
+      elem$.removeClass("error-input");
+      dupErrorCounter.count(-1);
+      return false
+    }
+  }
+  
+  function getDuplicateChecker(entrySection){
+    if(entrySection === "person-field-name"){
+      return duplicatePersonChecker;
+    }
+    else if(entrySection === "place-field-name"){
+      return duplicatePlaceChecker;
+    }
+    else if(entrySection === "person-field-gender"){
+      return null;
+    }
+    else{
+      throw "section mismatch in frontend: " + entrySection;
+    }
+  }
+  
+  function clearLocalInputs(){
+    $(".person-field .txtBox").html(suggestionSpan);
+    $(".person-field select").val("");
+    $(".place-field .txtBox").html(suggestionSpan);
+    duplicatePersonChecker = new TwoWayDictionary();
+    duplicatePlaceChecker = new TwoWayDictionary();
+  }
+  
+  function elementIsGenderSelect(elem$){
+    return elem$.is("select");
+  }
+  
+  function scoopAllInputs(){
+    var persons = [];
+    var places = [];
+     $(".person-field").each(function(i,e){
+       const e$ = $(e);
+       var name = e$.children(".txtBox").text();
+       if(name){
+         var gender = e$.children("select").val();
+         var id = e$.attr("id");
+         persons.push({"name":name,"gender":gender,"elementId":id});
+       }
+     });
+    
+    $(".place-field").each(function(i,e){
+      const e$ = $(e);
+      var name = e$.children(".txtBox").text();
+      if(name){
+        var id = e$.attr("id");
+        places.push({"name":name,"elementId":id});
+      }
+    });
+    return {"persons":persons,"places":places};
+  }
+  
+  function handleResultCodeDuplicates(results){
+    dupErrorCount += results.idsForDuplicates.length;
+    results.idsForDuplicates.forEach(function(id){  
+      $("#" +id + " .txtBox").addClass("error-input");
+    });
+    unhide($("#duplicate-error"));
+  }
+  
+    function setInputsWithPreviousValues(prevValues){
+    var currentPersonCell$ = $(".person-field").first();
+    var currentPlaceCell$ = $(".place-field").first();
+    for(var i=0;i<prevValues.length;i++){
+      if(prevValues[i].length < 1) return;
+      var personName = prevValues[i][0];
+      var sGender = prevValues[i][1];
+      var placeName = prevValues[i][2];
+      currentPersonCell$.children(".txtBox").html(personName+suggestionSpan);
+      currentPersonCell$.children("select").val(sGender);
+      currentPlaceCell$.children(".txtBox").html(placeName+suggestionSpan);
+      
+      duplicatePersonChecker.setKeyAndValue(makeStrKeySafe(personName),currentPersonCell$.children(".txtBox").attr("id"));
+      duplicatePlaceChecker.setKeyAndValue(makeStrKeySafe(placeName), currentPlaceCell$.children(".txtBox").attr("id"));
+      
+      if(personName||sGender){
+        if(!currentPersonCell$.next().length){
+          appendNewCell(currentPersonCell$);
+        }
+        currentPersonCell$ = currentPersonCell$.next();
+      }
+      
+      if(placeName){
+        if(!currentPlaceCell$.next().length){
+          appendNewCell(currentPlaceCell$);
+        }
+        currentPlaceCell$ = currentPlaceCell$.next();
+      }
+    }
+  }
+  //end input fields---------------------------------------------------------------------------------------------
+  
+  //history-entries-box------------------------------------------------------------------------------------------
+  function correctHistAttrs(changeLength,index){
+    var entry$ = $(".not-staging").eq(index);
+    while(entry$.length){
+      incrementId(entry$,-1);
+      incrementIndex(entry$,-1);
+      var shiftedRange = getIncrementedA1Range(entry$.attr("data-lkRange"),changeLength,changeLength);
+      entry$.attr("data-lkRange",shiftedRange);
+      entry$ = entry$.prev(".not-staging");
+    }
+    var selectedLkRange = $(".selected-history-entry").attr("data-lkRange");
+  }
+  
+  function correctHistRefs(changeLength,index){
+    var entry$ = $(".not-staging").eq(index);
+    var lkRange = entry$.attr("data-lkRange");
+    var shiftedRange = getIncrementedA1Range(lkRange,0,changeLength);
+    entry$.attr("data-lkRange",shiftedRange);
+    entry$ = entry$.prev(".not-staging");
+    while(entry$.length){
+      lkRange = entry$.attr("data-lkRange");
+      shiftedRange = getIncrementedA1Range(lkRange,changeLength,changeLength);
+      entry$.attr("data-lkRange",shiftedRange);
+      entry$ = entry$.prev(".not-staging");
+    }
+    var selectedLkRange = $(".selected-history-entry").attr("data-lkRange");
+  }
+  
+  function addToHistDispl(historyEntryInfo){
+    addLocalHistoryEntryRef(historyEntryInfo);
+    histEntriesBox$.remove("#staging-history-entry");
+    selectHistoryEntry($(".not-custom").first());
+  }
+  
+  function addStagingToHistDispl(){
+    histEntriesBox$.prepend(stagingHistoryEntry);
+    const added$ = $("#staging-history-entry")
+    safeBindEvent(added$,"click",historyEntryClick);
+    selectHistoryEntry(added$);
+  }
+  
+  function addCustomToHistDispl(){
+    histEntriesBox$.append(customHistoryEntry);
+    const added$ = $("#custom-history-entry");
+    safeBindEvent(added$,"click",historyEntryClick);
+    selectHistoryEntry(added$);
+  }
+  
+  function removeStagingFromHistDispl(){
+    removeFromHistDispl($("#staging-history-entry"));
+  }
+  
+  function removeFromHistDispl(entry$){
+    entry$.remove();
+    var notCustom$ = $(".not-custom");
+  }
+  
+  function addLocalHistoryEntryRef(historyEntryInfo){
+    const firstNotStaging$ = $(".not-staging").first();
+    var index = firstNotStaging$.length?(firstNotStaging$.attr("data-index")*1)+1:1;
+    var entryOptionStr = buildSingleHistoryEntryOption(historyEntryInfo.a1Range,convertToDateString(historyEntryInfo.currentDate),index);
+    const entriesBox$ = $("#history-entries-box");
+    if(firstNotStaging$.length){
+      firstNotStaging$.before(entryOptionStr);
+    }else{
+      entriesBox$.append(entryOptionStr);
+    }
+    const added$ = $(".not-staging").first();
+    safeBindEvent(added$,"click",historyEntryClick);
+    
+	const elements$AndProps = [{elem$:entriesBox$,colorProp:"border-color"},{elem$: added$,colorProp:"background-color" }];
+    entriesBox$.css({"border-width":"5px","border-style":"solid"});
+    fadeOutColor(elements$AndProps,117,100,83);  
+  }
+  
+  function historyEntryClick(e){
+    selectHistoryEntry($(e.target));
+  }
+  
+  function selectHistoryEntry(target$){
+    $(".selected-history-entry").removeClass("selected-history-entry");
+    target$.addClass("selected-history-entry");
+    selectionUIchange(target$.attr("id"));
+    serverCall(getHistoryDataSuccess).getHistoryEntryData(target$.attr("data-lkRange"));
+  }
+  
+  function addHistEntriesBoxToPage(entries){
+      histEntriesBox$.empty();
+      const entryOptions = buildHistoryEntriesStr(entries);
+      histEntriesBox$.append(entryOptions);
+      safeBindEvent($(".history-entries"),"click",historyEntryClick);
+  }
+  
+  function buildHistoryEntriesStr(entries){
+    var selectOptions = "";
+    if(globalState === "staging"){
+      selectOptions += stagingHistoryEntry;
+    }
+    selectOptions += customHistoryEntry;
+    if(entries&&entries.length){
+      for(var i=entries.length-1;i>=0;i--){
+        var lkRange = entries[i][0];
+        var storedDate = convertToDateString(entries[i][1]);
+        selectOptions += buildSingleHistoryEntryOption(lkRange,storedDate,i+1);
+      }
+    }
+    return selectOptions;
+  }
+  
+  function buildSingleHistoryEntryOption(lkRange,storedDate,rowNum){
+    return ["<div",
+            " id='history-entry"+rowNum+"'",
+            " class='history-entries not-staging not-custom'",
+            " data-lkRange='"+lkRange +"'",
+            " data-index='"+rowNum+"'>",
+            storedDate,
+            "</div>"].join("");
+  }
+  
+  function selectionUIchange(id){
+    if(id == "staging-history-entry"){
+      unhide(newSortSame$);
+      unhide(clearStaging$);
+      hide(deleteEntry$);
+      hide(commitCustom$);
+      hide(clearCustom$);
+    }
+    else if(id == "custom-history-entry"){
+      hide(newSortSame$);
+      hide(clearStaging$);
+      hide(deleteEntry$)
+      unhide(commitCustom$);
+      unhide(clearCustom$);
+    }
+    else{
+      unhide(deleteEntry$);
+      hide(newSortSame$);
+      hide(clearStaging$);
+      hide(commitCustom$);
+      hide(clearCustom$);
+    }
+  }
+  //end history-entries-box---------------------------------------------------------------------------------
+  
+  function fadeOutColor(elements$AndProps,hue,sat,light){
+    var t = 100;
+    var allPromises = [];
+    for(var percent = light;percent < 100;percent += .01){
+      	t+= 1;
+    	allPromises.push(new Promise(function(resolve,reject){
+          (function(ii,tt){	
+            setTimeout(function(){
+              elements$AndProps.forEach(function(item){
+                item.elem$.css(item.colorProp,"hsl("+hue+","+sat+"%,"+ii+"%)");
+              });
+              resolve();
+            },tt);      
+          })(percent,t);
+        }));  
+    }
+    Promise.all(allPromises).then(function(){
+      elements$AndProps.forEach(function(item){
+        item.elem$.css(item.colorProp,"");
+      });
+      $("#history-entries-box").css({"border-width":"","border-style":""});
+    },
+    function(reason) {
+      console.log(reason); // Error!
+      serverCall().logFrontEndErrors(reason);
+    });
+  }
+  
+  //table cache tools-----------------------------------------------------------------------------------------
+  function loadtableData(lkRange){
+    var kLkRange = makeStrKeySafe(lkRange);
+    if(kLkRange in tableCache){
+       wireUpTable(tableCache[kLkRange].tableHtml);
+    }
+    else{
+      serverCall(getHistoryDataSuccess).getHistoryEntryData(lkRange);
+    }
+  }
+  //end table cache tools-------------------------------------------------------------------------------------
+  
+  //common utilities------------------------------------------------------------------------------------------
+  function serverCall(successCallBack,localData){
+    successCallBack = successCallBack||emptyFunc;
+    localData = localData||{};
+    localData.stack = (new Error()).stack;
+    return google.script.run.withFailureHandler(failureCallback).withUserObject(localData)
+      .withSuccessHandler(function(serverData,localData){
+        callOnSuccess(successCallBack,serverData,localData);
+      });
+  }  
+  
+  function incrementIndex(elem$,incrementSize){
+    var incrementedIndex = (elem$.attr("data-index")*1)+incrementSize;
+    elem$.attr("data-index",incrementedIndex);
+  }
+  
+  function incrementId(elem$,incrementSize){
+    if(!elem$){
+      return;
+    }
+    if(!incrementSize){
+      incrementSize = 1
+    }
+    var prevId = elem$.attr("id");
+    elem$.attr("id",getNextId(prevId,incrementSize));
+  }
+  
+  function getNextId(prevId,incrementSize){
+    if(!prevId){
+      return;
+    }
+    if(!incrementSize){
+      incrementSize = 1
+    }
+    var rgx = /\d+$/;
+    var numPart = (prevId.match(rgx)[0]) >>>0;
+    numPart += incrementSize;
+    return prevId.replace(rgx,numPart);
+  }
+  
+  function getInputSectionAndIndex(elementId){
+    var rgx = /([A-Za-z\-_0-9]+[A-Za-z\-_]+)(\d+)$/;
+    var matches = elementId.match(rgx);
+    return {"section":matches[1],"index":matches[2]};
+  }
+  
+  function makeStrHTMLSafe(str){
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/,"&quot;").replace(/'/g,"&#39;");
+  }
+  
+  function getRowColCoordinatesFromId(elemId){
+    var m = elemId.match(/result-row(\d+)-col(\d+)/);
+    return {"row":m[1],"col":m[2]};
+  }
+  
+  function convertToDateString(msSince1970UTC){
+    const d = new Date();
+    d.setTime(msSince1970UTC);
+    const dateOptions = {hour:"2-digit",minute:"2-digit",timeZoneName:"short"};
+    return d.toLocaleDateString("en-US",dateOptions);
+  }
+  
+  function trimFrontNumbers(str){
+    str = str?str:"";
+    return str.replace(/^[0-9\.]+/,"");
+  }
+  
+  function makeStrKeySafe(str){
+    var frontnumbersTrimed = trimFrontNumbers(str);
+    var regexedStr = frontnumbersTrimed.replace(/[^A-Za-z0-9]/gi,'');
+    return regexedStr.toLowerCase();
+  }
+  
+  function hide(elem$){
+    elem$.addClass("hidden");
+  }
+  
+  function unhide(elem$){
+    elem$.removeClass("hidden");
+  }
+  
+  function getSectionColumn(section){
+    return (section === "person-field-name")?1:(section === "person-field-gender")?2:
+      (section === "place-field-name")?3:-1;
+  }
+  
+  function getIncrementedA1Range(a1Range,topSteps,bottomSteps,frontSteps,backSteps){
+    const rangeInfo = getA1RangeInfo(a1Range);
+    var firstCol = frontSteps?convertToCol(convertToNum(rangeInfo.firstCol + frontSteps)):rangeInfo.firstCol;
+    var lastCol = backSteps?convertToCol(convertToNum(rangeInfo.lastCol + backSteps)):rangeInfo.lastCol;
+    var firstRow = topSteps?topSteps + rangeInfo.firstRow:rangeInfo.firstRow;
+    var lastRow = bottomSteps?bottomSteps + rangeInfo.lastRow: rangeInfo.lastRow;
+    
+    return firstCol+firstRow+":"+lastCol+lastRow; 
+  }
+  
+  function getA1RangeInfo(a1Range){
+    const rgx = /([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)/;
+    var matches = a1Range.match(rgx);
+    if(matches){
+      return {"firstCol":matches[1]
+              ,"firstRow":matches[2]*1
+              ,"lastCol":matches[3]
+              ,"lastRow":matches[4]*1};
+    }
+    else{
+      return null;
+    }
+  }
+  
+  function convertToCol(num) {
+    if (num < 1) throw new Error("num is less than 1: " + num);
+    const keyCodeLB = 65;
+    const base = 26;
+    output = [];
+    while (num) {
+      var m = ((num-1) % base);
+      num -= m;
+      num = (num / base) >>> 0;
+      output.push(String.fromCharCode(keyCodeLB + m));
+    }
+    return output.reverse().join("");
+  }
+  
+  function convertToNum(A1){
+    var sum = 0;
+    const base = 26;
+    const keyCodeLB = 65;
+    for(var i = 0;i<A1.length;i++){
+      var pow = A1.length - i - 1;
+  	  var charValue = Math.pow(base,pow)*(A1.charCodeAt(i)-keyCodeLB +1); 
+      sum += charValue;
+    }
+    return sum;
+  }
+  
+  function loadTreeWithNames(tree,names){
+    for(var i = 0;i<names.length;i++){
+      tree.push(names[i]);
+    }
+  }
+  
+  function safeBindEvent(element$,event,callback){
+    const tryCatchCallback = function(e){
+      try{
+        callback(e);
+      }
+      catch(err){
+        handleCommonError(err);
+      }
+    };
+    element$.off(event);
+    element$.on(event,tryCatchCallback);
+  }
+  
+  function handleCommonError(err){
+    var errorInfo = err + "\n" + err.stack;
+    serverCall().logFrontEndErrors(errorInfo);
+    throw new Error(errorInfo);
+  }
+  // end common utilities------------------------------------------------------------------------------------------------------------------
+  
+  //pop-ups--------------------------------------------------------------------------------------------------------------------------------
+  const popUpQueue = [];
+  var isModalOpen = false;
+  const closeBtnStr = "<button type='button' id='modal-close' class='default-button notice-button'><span>Close</span></button>";
+  const yesBtnStr = "<button type='button' id='modal-prompt-yes' class='default-button notice-button'><span>Yes</span></button>";
+  const noBtnStr = "<button type='button' id='modal-prompt-no' class='default-button notice-button'><span>No</span></button>";
+  
+  function displayNotice(noticeText){
+    unhide($("#prevent-extra-popups-group"));
+    if(!isModalOpen){
+      isModalOpen = true;
+      displayAction({"noticeText":noticeText,
+      "buttons":[{"str":closeBtnStr,"callback":closeModal}]});
+    }
+    else{
+      popUpQueue.push({"callback":displayAction,
+                       "displArgs":{"noticeText":noticeText,
+                                    "buttons":[{"str":closeBtnStr,"callback":closeModal}]}});
+    }   
+  }
+  
+  function displayYesNoChoice(promptText,promptYes,promptNo){    
+    promptYes = promptYes||emptyFunc;
+    promptNo = promptNo||emptyFunc;   
+    const promptYesClose = function(e){
+      promptYes(e);
+      closeModal(e);
+    };
+    
+    const promptNoClose = function(e){
+      promptNo(e);
+      closeModal(e);
+    };
+    hide($("#prevent-extra-popups-group"));
+    if(!isModalOpen){
+      isModalOpen = true;
+      displayAction({"noticeText":promptText,
+                                    "buttons":[{"str":yesBtnStr,"callback":promptYesClose},
+                                               {"str":noBtnStr,"callback":promptNoClose}
+                                              ]
+                   });
+    }
+    else{
+      popUpQueue.push({"callback":displayAction,
+                       "displArgs":{"noticeText":promptText,
+                                    "buttons":[{"str":yesBtnStr,"callback":promptYesClose},
+                                               {"str":noBtnStr,"callback":promptNoClose}
+                                              ]
+                                   }
+                      });
+    }
+  }
+  
+  function displayAction(displArgs){
+    if(!$("#prevent-extra-popups").prop("checked")){
+      const modalWindow$ = $("#notice-box");
+      unhide(modalWindow$);
+      const modalContent$ = $("#notice-inner-content");
+      modalContent$.append("<div>"+makeStrHTMLSafe(displArgs["noticeText"])+"<\div>");
+      var btnStr = "<div id='modal-buttons'>";
+      if("buttons" in displArgs){
+        var buttons = displArgs["buttons"];
+        for(var i=0;i<buttons.length;i++){
+          btnStr += buttons[i]["str"];
+        }
+        btnStr += "</div>";
+        modalContent$.append(btnStr);
+        const buttons$ = $("#modal-buttons").children("button");
+        var tmpButton$ = buttons$.first();
+        var i = 0;
+        while(tmpButton$.length > 0){
+          safeBindEvent(tmpButton$,"click",buttons[i]["callback"]);
+          tmpButton$ = tmpButton$.next();
+          i++;
+        }
+      }
+    }
+    else{
+      isModalOpen = false;
+    }
+  }
+  
+  function closeModal(e){
+      $("#notice-inner-content").empty();
+      hide($("#notice-box"));
+      if(popUpQueue.length){
+        var displCallInfo = popUpQueue.shift();
+        setTimeout(function(tE){
+          displCallInfo.callback(displCallInfo.displArgs);
+        },100);
+      }
+      else{
+        isModalOpen = false;
+      }
+  }
+  
+  //end pop-ups----------------------------------------------------------------------------------------------------------------------------
+  
+  function TwoWayDictionary(){
+    var defaultDict = {};
+    var converseDict = {};
+    this.setKeyAndValue = setKeyAndValue;
+    this.getValueForKey = getValueForKey;
+    this.getKeyForValue = getKeyForValue;
+    this.hasElement = hasElement
+    this.deleteByKey = deleteByKey;
+    this.deleteByValue = deleteByValue;
+    
+    function setKeyAndValue(key,value){
+      defaultDict[key] = value;
+      converseDict[value] = key;
+    }
+    function getValueForKey(key){
+      return defaultDict[key];
+    }
+    function getKeyForValue(value){
+      return converseDict[value];
+    }
+    function hasElement(e){
+      return (e in defaultDict||e in converseDict);
+    }
+    function deleteByKey(key){
+      var v = defaultDict[key];
+      delete converseDict[v];
+      delete defaultDict[key];
+    }
+    function deleteByValue(value){
+      var k = converseDict[value];
+      delete defaultDict[k];
+      delete converseDict[value];
+    }    
+  }
+  
+  function DuplicateErrorCounter(){
+    var dupErrorCount = 0;
+    this.count = count;
+    function count(hits){
+      if(!dupErrorCount&&hits < 0){
+        return;
+      }
+      dupErrorCount += hits;
+      showErrorMessageForDuplicates();
+    }
+    function showErrorMessageForDuplicates(){
+      if(dupErrorCount){
+        unhide($("#duplicate-error"));
+      }
+      else{
+        hide($("#duplicate-error"));
+      }
+    }
+  }
+  
+  function Trie(ignoreCase) {
+    this.letters = [];
+    this.suffixes = [""];
+    this.index = 0;
+    this._ignoreCase = ignoreCase && true;
+  }
+
+  Trie.prototype.push = function(str) {
+    if (!str) return;
+    if (!this.search(str)) {
+      this.suffixes.push(str);
+      var first = str.charAt(0);
+      if (this._ignoreCase) first = first.toLowerCase();
+      if (first in this) {
+        var child = this[first];
+      } else {
+        var child = new Trie(this._ignoreCase);
+        this[first] = child;
+        this.letters.push(first);
+      }
+      child.push(str.substring(1));
+    }
+  };
+
+  Trie.prototype.getMatch = function(str) {
+    if (!str) {
+      return this;
+    } else {
+      var first = str.charAt(0);
+      if (this._ignoreCase) first = first.toLowerCase();
+      if (first in this) {
+        var child = this[first];
+        return child.getMatch(str.substring(1));
+      } else {
+        return new Trie(this._ignoreCase);
+      }
+    }
+  };
+  
+  Trie.prototype.delete = function(str) {
+    if (!str) return;
+    var first = str.charAt(0);
+    if (this._ignoreCase) first = first.toLowerCase();
+    if (first in this) {
+      this.suffixes = this.suffixes.filter(function(e) {
+        return e !== str
+      });
+      var child = this[first];
+      child.delete(str.substring(1));
+      if (child.suffixes.length === 1) { //there should at least be an empty string
+        delete this[first];
+      }
+
+    }
+  };
+
+  Trie.prototype.search = function(str) {
+    if (!str) return true;
+    var first = str.charAt(0);
+    if (this._ignoreCase) first = first.toLowerCase();
+    if (first in this) {
+      var child = this[first];
+      return child.search(str.substring(1));
+    } else {
+      return false;
+    }
+  };
+
+  Trie.prototype.next = function() {
+    this.index = (++this.index) % this.suffixes.length;
+    var suffix = this.suffixes[this.index];
+    return suffix;
+  };
+  
+})();
+
+</script>
+
+

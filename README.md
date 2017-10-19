@@ -6,7 +6,7 @@ Derick is in charge of organizing lunch and dinner at a week long conference and
 Tueday more people complain to Derick about how he is grouping them together. Katie has been assigned the soup place for the third time in a row. Ron, Horratio, and Quintin have eaten together every meal this week and are ready to branch out.
 And as the conference continues it gets harder and more difficult to assign people in such a way that they are not eating at the same place multiple times in a row or with the same people mutliple times in a row.
 
-### /*enter lunchSorter2000 /*  ###
+### *enter lunchSorter2000*  ###
 
 ## setup ##
 

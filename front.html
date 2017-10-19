@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target='_top'>
+    <?!= HtmlService.createHtmlOutputFromFile("displaySettings").getContent(); ?>
+    <script src='https://code.jquery.com/jquery-3.1.0.js'></script>
+    
+  </head>
+  <body>
+  <div id='banner'>Lunch Sorter 2000</div>
+  <div id='content'>
+      <div id='controls'>
+        <div id='people-box' class='group-box'>
+          <div class='box-title'>People</div>
+          <?for(var i=1;i<=15;i++){ ?>
+          <div class='person-field' id='person-field<?=i;?>' data-index='<?=i;?>' data-section='person'>
+                  <div contenteditable='true' id='person-field-name<?=i;?>' class='txtBox tabTo' data-section='person'></div>
+                  <select name='gender-select' id='person-field-gender<?=i;?>' class="tabTo" data-section='person'>
+                    <option value='0'></option>
+                    <option value='m'>Male</option>
+                    <option value='f'>Female</option>
+                  </select>
+              </div>
+          <? } ?>
+        </div>
+        <div id='place-box' class='group-box'>
+          <div class='box-title'>Party/Team/Restaurant/etc.</div>
+          <?for(var i=1;i<=15;i++){ ?>
+          <div class='place-field' id='place-field<?=i;?>' data-index='<?=i;?>' data-section='place'>
+                <div contenteditable='true' id='place-field-name<?=i;?>' class='txtBox tabTo' data-section='place'></div>
+            </div>
+          <? } ?>
+        </div>
+        <button type='button' class='default-button table-buttons' id='clearInputs' title='clear all the people and restaurants entered in the People and restaurants columns'> <span>Clear People And Restaurants</span></button> 
+      </div>
+      <div id='duplicate-error' class='error-message hidden'>There are duplicate values in your entries. Please rename one of them.</div>
+      <div class="button-row"> 
+        <button type='button' class='default-button' id='sort' title='Sort the people into mathematically determined ideal groups'> <span>Sort people into parties</span></button>         
+      </div>
+      <div id='viewOutput'>
+        <div id='entry-control'>
+          <div id='history-entries-box' >
+            <div id='custom-history-entry' class='history-entries' data-lkRange='1'>Custom</div>
+          </div>
+          <button type='button' class='default-button hidden table-buttons' id='deleteEntry' title='Delete this entrie from the history so that it&apos;s not factored into calculations'><span>Delete Selected Entry</span></button>
+        </div>
+        <div id='output-controls'>
+          <div class="button-row">   
+            <button type='button' class='default-button hidden table-buttons' id='commitCustom' title='Save custom entered groups to history '><span>Save custom entry</span></button>
+            <button type='button' class='default-button hidden table-buttons' id='clearCustom' title='Clear all the items entered into the custom entry table'><span>Clear custom items</span></button>
+            <button type='button' class='default-button hidden table-buttons' id='newSortSame' title='Save the calculated table to the history to be factored into future calculations'><span>Save results and start again</span></button>
+            <button type='button' class='default-button hidden table-buttons' id='clearStaging' title='Dump the unwanted calculated results'><span>Clear results without saving</span></button>
+          </div>
+          <div id='output'></div>
+          <button type='button' class='default-button plus-button' id='add-col' title='Add new column'><span>&plus;</span></button>
+          <button type='button' class='default-button plus-button table-buttons' id='add-row' title='Add new row'><span>&plus;</span></button>
+        </div>
+      </div>
+      <button type='button' class='default-button' id='resetApp' title='Reset the whole application so that everything is deleted'><span>Reset application</span></button>  
+    </div>
+    <div id='loading-box' class='hidden modal-box'>
+      <div id='waiting-content' class='modal-content'>
+        Waiting...
+      </div>
+    </div>
+    <div id='notice-box' class='hidden modal-box'>
+      <div id='notice-content' class='modal-content'>
+        <div class='modal-header'>
+          <span class='close'>&times;</span>
+        </div>
+        <div id='notice-inner-content'></div>
+        <div class='modal-footer'>
+          <div id='prevent-extra-popups-group'>
+            <input type='checkbox' id='prevent-extra-popups'/>
+            <label for='prevent-extra-popups'>Prevent extra popups</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <?!= HtmlService.createHtmlOutputFromFile("frontScript").getContent(); ?>
+  </body>
+</html>
+
+
